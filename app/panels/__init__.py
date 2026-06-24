@@ -1,0 +1,1 @@
+"""Seitenleisten-Panels (Thumbnails, Eigenschaften)."""
