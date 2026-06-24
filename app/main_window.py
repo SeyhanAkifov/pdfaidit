@@ -194,6 +194,7 @@ class MainWindow(QMainWindow):
             return
         self.edit_model.clear()
         self._dirty = False
+        self.view.reset_font_cache()
         self.thumbs.populate(self.document)
         self.goto_page(0)
         self.view.fit_width()

@@ -21,19 +21,25 @@ _HOVER_PEN = QPen(QColor(0, 120, 215, 130), 0, Qt.PenStyle.DotLine)
 _SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
 
 
-def qfont_from_pdf(font_name: str, size: float) -> QFont:
+def qfont_from_pdf(font_name: str, size: float, family_override: str | None = None) -> QFont:
     """Baut eine möglichst passende QFont aus dem PDF-Fontnamen.
 
-    Setzt Schriftfamilie sowie Fett/Kursiv anhand des Namens. Ist die Familie
-    nicht installiert, ersetzt Qt sie – Stil (Gewicht/Neigung) bleibt erhalten.
+    Ist ``family_override`` gesetzt (die echte, in Qt geladene eingebettete
+    Schrift), wird genau diese Familie verwendet -> pixelgenaue Vorschau.
+    Sonst wird die Familie aus dem Namen erraten; Fett/Kursiv kommen immer
+    aus dem Namen, damit auch ohne exakte Familie der Stil stimmt.
     """
     name = _SUBSET_PREFIX.sub("", font_name or "")
     lower = name.lower()
     bold = any(k in lower for k in ("bold", "black", "heavy", "semibold", "demi"))
     italic = "italic" in lower or "oblique" in lower
-    family = re.split(r"[-,]", name)[0].strip() or "Helvetica"
-    # Häufige PostScript-Schreibweisen leserlicher machen
-    family = re.sub(r"(MT|PSMT|PS|Std)$", "", family).strip() or "Helvetica"
+
+    if family_override:
+        family = family_override
+    else:
+        family = re.split(r"[-,]", name)[0].strip() or "Helvetica"
+        # Häufige PostScript-Schreibweisen leserlicher machen
+        family = re.sub(r"(MT|PSMT|PS|Std)$", "", family).strip() or "Helvetica"
 
     font = QFont(family)
     font.setPointSizeF(max(size, 1.0))
@@ -57,13 +63,16 @@ def map_pdf_fontname(font: str) -> str:
 
 
 class TextItem(QGraphicsTextItem):
-    def __init__(self, span: dict, page_index: int, item_id: int, edit_model, page_view) -> None:
+    def __init__(self, span: dict, page_index: int, item_id: int, edit_model, page_view,
+                 qt_family: str | None = None, orig_pixmap=None) -> None:
         super().__init__()
         self._ready = False
         self.page_index = page_index
         self.item_id = item_id
         self.edit_model = edit_model
         self.page_view = page_view
+        self.qt_family = qt_family
+        self._orig_pixmap = orig_pixmap  # Bildausschnitt des Originals (für schriftfreie Verschiebung)
         self._editing = False
         self._hover = False
 
@@ -82,7 +91,7 @@ class TextItem(QGraphicsTextItem):
         # Darstellung
         self.document().setDocumentMargin(0)
         self.setPlainText(self.orig_text)
-        self.setFont(qfont_from_pdf(self.orig_font, self.fontsize))
+        self.setFont(qfont_from_pdf(self.orig_font, self.fontsize, self.qt_family))
         self.setDefaultTextColor(QColor.fromRgbF(*self.color))
 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -125,6 +134,15 @@ class TextItem(QGraphicsTextItem):
         self.page_view.update_cover(self)
 
     # --- Geometrie / Zeichnen ------------------------------------------
+    def _orig_size(self) -> tuple[float, float]:
+        return (self.orig_rect[2] - self.orig_rect[0], self.orig_rect[3] - self.orig_rect[1])
+
+    def boundingRect(self) -> QRectF:
+        # Text-Bereich UND Original-Bildbereich abdecken (sonst Clipping)
+        base = super().boundingRect()
+        ow, oh = self._orig_size()
+        return base.united(QRectF(0, 0, ow, oh))
+
     def shape(self) -> QPainterPath:
         # Gesamten Bounding-Bereich klickbar machen (nicht nur Glyphen)
         path = QPainterPath()
@@ -135,8 +153,21 @@ class TextItem(QGraphicsTextItem):
         # Qt-eigene Auswahlmarkierung unterdrücken (wir zeichnen selbst)
         option.state &= ~QStyle.StateFlag.State_Selected
 
-        if self._editing or self.has_edit():
+        edit = self.edit_model.get(self.page_index, self.item_id)
+        text_changed = self._editing or (edit is not None and edit.new_text != self.orig_text)
+        move_only = edit is not None and not text_changed
+
+        if text_changed:
+            # Inhalt wird geändert -> echten (editierbaren) Text rendern
             super().paint(painter, option, widget)
+        elif move_only:
+            # Reine Verschiebung: bei einbettbarer Schrift Vektortext, sonst Bildausschnitt
+            if self.qt_family is None and self._orig_pixmap is not None:
+                ow, oh = self._orig_size()
+                painter.drawPixmap(QRectF(0, 0, ow, oh), self._orig_pixmap,
+                                   QRectF(self._orig_pixmap.rect()))
+            else:
+                super().paint(painter, option, widget)
 
         if self.isSelected():
             painter.setPen(_SELECT_PEN)

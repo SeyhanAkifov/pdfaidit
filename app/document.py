@@ -85,27 +85,22 @@ class PdfDocument:
         page.set_rotation((page.rotation + degrees) % 360)
 
     # --- Schrift-Einbettung --------------------------------------------
-    def _embedded_fontfile(self, page: fitz.Page, basefont: str) -> str | None:
-        """Extrahiert die eingebettete Schrift `basefont` der Seite als Datei.
+    @staticmethod
+    def _alpha(s: str) -> str:
+        # Nur Buchstaben, ohne Subset-Präfix -> robust gegen "ArialMT" vs "Arial Regular"
+        return re.sub(r"[^a-z]", "", re.sub(r"^[A-Z]{6}\+", "", s or "").lower())
 
-        Liefert einen Pfad zu einer temporären Fontdatei oder None, wenn die
-        Schrift nicht eingebettet/extrahierbar ist (dann Basis-14-Fallback).
-        """
+    def _find_embedded_font(self, page: fitz.Page, basefont: str) -> tuple[int | None, str | None]:
+        """Findet die am besten passende eingebettete Schrift -> (xref, endung)."""
         if not basefont:
-            return None
-        if basefont in self._fontfile_cache:
-            return self._fontfile_cache[basefont]
-        def alpha(s: str) -> str:
-            # Nur Buchstaben, ohne Subset-Präfix -> robust gegen "ArialMT" vs "Arial Regular"
-            return re.sub(r"[^a-z]", "", re.sub(r"^[A-Z]{6}\+", "", s or "").lower())
-
-        target = alpha(basefont)
+            return None, None
+        target = self._alpha(basefont)
         best_xref: int | None = None
         best_ext: str | None = None
         best_score = -1
         try:
             for finfo in page.get_fonts(full=False):
-                xref, ext, bname = finfo[0], finfo[1], alpha(finfo[3])
+                xref, ext, bname = finfo[0], finfo[1], self._alpha(finfo[3])
                 if ext not in ("ttf", "otf", "cff", "ttc"):
                     continue
                 # Länge des gemeinsamen Präfixes als Ähnlichkeitsmaß
@@ -117,12 +112,40 @@ class PdfDocument:
                     score = max(score, min(len(bname), len(target)))
                 if score > best_score:
                     best_score, best_xref, best_ext = score, xref, ext
+        except Exception:
+            return None, None
+        if best_xref is not None and best_score >= 4:
+            return best_xref, best_ext
+        return None, None
 
-            path: str | None = None
-            if best_xref is not None and best_score >= 4:
-                extracted = self.doc.extract_font(best_xref)
+    def font_bytes(self, page_index: int, basefont: str) -> bytes | None:
+        """Liefert die rohen Bytes der eingebetteten Schrift (für die Qt-Vorschau)."""
+        page = self.doc[page_index]
+        xref, _ = self._find_embedded_font(page, basefont)
+        if xref is None:
+            return None
+        try:
+            return self.doc.extract_font(xref)[-1] or None
+        except Exception:
+            return None
+
+    def _embedded_fontfile(self, page: fitz.Page, basefont: str) -> str | None:
+        """Extrahiert die eingebettete Schrift `basefont` als temporäre Datei.
+
+        Liefert einen Pfad oder None, wenn die Schrift nicht eingebettet/
+        extrahierbar ist (dann Basis-14-Fallback beim Speichern).
+        """
+        if not basefont:
+            return None
+        if basefont in self._fontfile_cache:
+            return self._fontfile_cache[basefont]
+        xref, ext = self._find_embedded_font(page, basefont)
+        path: str | None = None
+        try:
+            if xref is not None:
+                extracted = self.doc.extract_font(xref)
                 content = extracted[-1]
-                real_ext = extracted[1] or best_ext
+                real_ext = extracted[1] or ext or "ttf"
                 if content:
                     fd, tmp = tempfile.mkstemp(suffix=f".{real_ext}")
                     with os.fdopen(fd, "wb") as fh:
@@ -158,10 +181,19 @@ class PdfDocument:
             annot_edits = [e for e in edits if isinstance(e, AnnotEdit)]
             form_edits = [e for e in edits if isinstance(e, FormEdit)]
 
-            # 0. Eingebettete Schriften sichern, SOLANGE der Originaltext noch da ist
-            #    (nach der Redaktion ist die Schrift evtl. nicht mehr referenziert)
+            # 0. SOLANGE der Originaltext noch da ist:
+            #    a) eingebettete Schriften sichern (für Vektor-Neusatz)
+            #    b) für reine Verschiebungen OHNE einbettbare Schrift die Originalstelle
+            #       als Bild rendern -> pixelgenaue Übernahme, schriftunabhängig
+            move_pixmaps: dict[int, fitz.Pixmap] = {}
             for edit in text_edits:
-                self._embedded_fontfile(page, edit.orig_font)
+                fontfile = self._embedded_fontfile(page, edit.orig_font)
+                move_only = (not edit.deleted) and (edit.new_text == edit.orig_text)
+                if move_only and not fontfile:
+                    clip = fitz.Rect(*edit.orig_rect)
+                    move_pixmaps[edit.item_id] = page.get_pixmap(
+                        matrix=fitz.Matrix(3, 3), clip=clip, alpha=False
+                    )
 
             # 1. Redaktionen sammeln (Original-Inhalte entfernen, in Cover-Farbe füllen)
             for edit in text_edits:
@@ -171,11 +203,18 @@ class PdfDocument:
             if text_edits or image_edits:
                 page.apply_redactions()
 
-            # 2. Texte neu einfügen
+            # 2. Texte neu einfügen (als Bild bei reiner Verschiebung ohne Schrift, sonst Vektor)
             for edit in text_edits:
                 if edit.deleted:
                     continue
-                self._insert_text(page, edit)
+                if edit.item_id in move_pixmaps:
+                    x, y = edit.new_origin
+                    w = edit.orig_rect[2] - edit.orig_rect[0]
+                    h = edit.orig_rect[3] - edit.orig_rect[1]
+                    page.insert_image(fitz.Rect(x, y, x + w, y + h),
+                                      pixmap=move_pixmaps[edit.item_id])
+                else:
+                    self._insert_text(page, edit)
 
             # 3. Bilder neu einfügen
             for edit in image_edits:

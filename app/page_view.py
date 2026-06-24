@@ -1,8 +1,16 @@
 """Die Seitenleinwand: rendert eine Seite und legt interaktive Overlays darüber."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtCore import Qt, QByteArray, QRectF, pyqtSignal
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QFontDatabase,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
@@ -47,6 +55,7 @@ class PageView(QGraphicsView):
         self.form_items: list = []
         self._view_zoom = 1.0
         self._annot_seq = 0
+        self._qt_families: dict[str, str | None] = {}  # PDF-Font -> in Qt geladene Familie
 
         # Zustand fürs Zeichnen
         self._drawing = False
@@ -78,7 +87,10 @@ class PageView(QGraphicsView):
 
         # Text-Overlays
         for i, span in enumerate(self.document.get_text_spans(index)):
-            item = TextItem(span, index, i, self.edit_model, self)
+            family = self._qt_family_for(span.get("font", ""), index)
+            orig_pix = self._image_preview(span["bbox"], qpix) if family is None else None
+            item = TextItem(span, index, i, self.edit_model, self,
+                            qt_family=family, orig_pixmap=orig_pix)
             item.setZValue(10)
             self.scene.addItem(item)
             self.text_items.append(item)
@@ -110,6 +122,30 @@ class PageView(QGraphicsView):
 
         self._apply_tool_interactivity()
         self.itemSelected.emit(None)
+
+    def reset_font_cache(self) -> None:
+        """Beim Öffnen eines neuen Dokuments den Font-Familien-Cache leeren."""
+        self._qt_families.clear()
+
+    def _qt_family_for(self, basefont: str, index: int) -> str | None:
+        """Lädt die eingebettete PDF-Schrift in Qt und liefert ihren Familiennamen.
+
+        So zeigt die Vorschau exakt die Originalschrift (kein Ersatz durch Qt).
+        """
+        if not basefont:
+            return None
+        if basefont in self._qt_families:
+            return self._qt_families[basefont]
+        family = None
+        data = self.document.font_bytes(index, basefont)
+        if data:
+            font_id = QFontDatabase.addApplicationFontFromData(QByteArray(data))
+            if font_id != -1:
+                families = QFontDatabase.applicationFontFamilies(font_id)
+                if families:
+                    family = families[0]
+        self._qt_families[basefont] = family
+        return family
 
     def _image_preview(self, bbox, qpix: QPixmap) -> QPixmap | None:
         """Schneidet die Bildregion aus dem Seitenbild als Verschiebe-Vorschau aus."""
@@ -181,36 +217,44 @@ class PageView(QGraphicsView):
         return self._sample_bg_color(item.orig_rect)
 
     def _sample_bg_color(self, orig_rect) -> QColor:
-        """Tastet die Hintergrundfarbe knapp außerhalb des Textbereichs ab."""
+        """Tastet die dominante Hintergrundfarbe rund um den Textbereich ab.
+
+        Es werden viele Punkte direkt neben dem Text (alle vier Seiten)
+        abgetastet und die *häufigste* Farbe gewählt. So verfälschen einzelne
+        Ausreißer (z. B. eine angrenzende weiße Ecke) das Ergebnis nicht – im
+        Gegensatz zu einem Kanal-Median, der bei gemischter Umgebung kippt.
+        """
         pix = getattr(self, "_page_pixmap", None)
         if pix is None:
             return QColor(255, 255, 255)
         image = pix.toImage()
+        w, h = image.width(), image.height()
         z = self.RENDER_ZOOM
         x0, y0, x1, y1 = (v * z for v in orig_rect)
         margin = max(int(2 * z), 2)
-        cx, cy = int((x0 + x1) / 2), int((y0 + y1) / 2)
-        candidates = [
-            (int(x0) - margin, cy),          # links
-            (int(x1) + margin, cy),          # rechts
-            (cx, int(y0) - margin),          # oben
-            (cx, int(y1) + margin),          # unten
-        ]
-        reds, greens, blues = [], [], []
-        for px, py in candidates:
-            if 0 <= px < image.width() and 0 <= py < image.height():
+
+        points: list[tuple[int, int]] = []
+        steps = 10
+        for i in range(steps + 1):
+            fx = int(x0 + (x1 - x0) * i / steps)
+            fy = int(y0 + (y1 - y0) * i / steps)
+            points.append((fx, int(y0) - margin))   # oben
+            points.append((fx, int(y1) + margin))   # unten
+            points.append((int(x0) - margin, fy))   # links
+            points.append((int(x1) + margin, fy))   # rechts
+
+        counts: dict[tuple[int, int, int], int] = {}
+        repr_color: dict[tuple[int, int, int], QColor] = {}
+        for px, py in points:
+            if 0 <= px < w and 0 <= py < h:
                 c = image.pixelColor(px, py)
-                reds.append(c.red())
-                greens.append(c.green())
-                blues.append(c.blue())
-        if not reds:
+                key = (c.red() // 16, c.green() // 16, c.blue() // 16)  # 16er-Raster
+                counts[key] = counts.get(key, 0) + 1
+                repr_color.setdefault(key, c)
+        if not counts:
             return QColor(255, 255, 255)
-
-        def median(values):
-            values.sort()
-            return values[len(values) // 2]
-
-        return QColor(median(reds), median(greens), median(blues))
+        best = max(counts, key=counts.get)
+        return repr_color[best]
 
     # --- Auswahl / Änderungen ------------------------------------------
     def selection_changed(self, item) -> None:

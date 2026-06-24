@@ -49,13 +49,17 @@ Das Ergebnis liegt unter `dist\pdfAIdit.exe`.
 
 ## Hinweise & Grenzen
 
-- **Schrift bleibt erhalten:** Beim Verschieben/Editieren wird die **eingebettete Originalschrift**
-  des PDFs extrahiert und wiederverwendet – die Optik bleibt also gleich. In der Editor-Vorschau
-  wird zusätzlich die passende Schriftfamilie samt Fett/Kursiv angezeigt.
-  - Eine **Standard-Schrift** (Helvetica/Times/Courier) wird nur als Fallback genutzt, wenn die
-    Schrift nicht eingebettet ist – oder wenn editierter Text **neue Zeichen** enthält, die im
-    eingebetteten (oft nur teilweisen) Schriftsatz fehlen. Schriftgröße/Farbe sind im
-    Eigenschaften-Panel anpassbar.
+- **Schrift bleibt erhalten – zwei Wege:**
+  - *Eingebettete Schrift vorhanden:* Sie wird extrahiert und sowohl in der Vorschau (über
+    `QFontDatabase`) als auch im gespeicherten PDF 1:1 wiederverwendet → echter Vektortext.
+  - *Keine (extrahierbare) Schrift eingebettet:* Beim **reinen Verschieben** wird der
+    Originalbereich **pixelgenau als Bild** an die neue Stelle übernommen → die Optik stimmt
+    immer, unabhängig von der Schrift. (Der verschobene Text ist dann nicht mehr markierbar.)
+  - *Editieren neuer Zeichen ohne eingebettete Schrift:* Hier ist kein Bild möglich (der Text
+    ändert sich), daher greift eine Standard-Schrift (Helvetica/Times/Courier); Größe/Farbe
+    sind im Eigenschaften-Panel anpassbar.
+  - Hinweis: Ein per Bild verschobener Block trägt seinen ursprünglichen Hintergrundausschnitt
+    mit. Auf Farbverläufen kann das bei großen Verschiebungen minimal sichtbar sein.
 - Verschieben/Editieren verdeckt den Originalbereich. Den **Modus der Abdeckung** stellst du
   unter **Optionen → Hintergrund-Abdeckung** ein:
   - *Automatisch* (Standard): die Hintergrundfarbe wird neben dem Text abgetastet – ideal für
