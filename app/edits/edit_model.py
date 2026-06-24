@@ -19,12 +19,14 @@ class TextEdit:
     item_id: int
     orig_rect: tuple[float, float, float, float]  # (x0, y0, x1, y1) in Punkten
     orig_text: str
-    fontname: str          # PDF-Basisfont-Name für insert_textbox (z. B. "helv")
+    fontname: str          # PDF-Basisfont-Name (Fallback, z. B. "helv")
+    orig_font: str         # Originaler (eingebetteter) Fontname aus dem PDF
     fontsize: float
     color: tuple[float, float, float]  # RGB 0..1
     new_text: str
     new_origin: tuple[float, float]    # (x, y) obere linke Ecke in Punkten
     deleted: bool = False
+    cover_color: tuple[float, float, float] = (1.0, 1.0, 1.0)  # Füllfarbe der entfernten Stelle
 
     @property
     def is_changed(self) -> bool:
@@ -45,6 +47,7 @@ class ImageEdit:
     orig_rect: tuple[float, float, float, float]
     new_rect: tuple[float, float, float, float]
     deleted: bool = False
+    cover_color: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
 
 @dataclass

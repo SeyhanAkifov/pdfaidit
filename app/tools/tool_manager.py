@@ -18,6 +18,10 @@ class ToolManager:
         self.current: Tool = Tool.SELECT
         self.color: tuple[float, float, float] = (1.0, 0.0, 0.0)
         self.width: float = 1.5
+        # Modus, wie der entfernte Originalinhalt überdeckt wird:
+        # "auto" = Hintergrundfarbe abtasten, "white" = weiß, "custom" = feste Farbe
+        self.cover_mode: str = "auto"
+        self.cover_rgb: tuple[float, float, float] = (1.0, 1.0, 1.0)
 
     def set_tool(self, tool: Tool) -> None:
         self.current = tool

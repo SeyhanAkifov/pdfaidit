@@ -1,6 +1,10 @@
 """Wrapper um ein PyMuPDF-Dokument (öffnen, rendern, extrahieren, speichern)."""
 from __future__ import annotations
 
+import os
+import re
+import tempfile
+
 import fitz
 
 from app.edits.edit_model import AnnotEdit, FormEdit, ImageEdit, TextEdit
@@ -10,6 +14,7 @@ class PdfDocument:
     def __init__(self) -> None:
         self.doc: fitz.Document | None = None
         self.path: str | None = None
+        self._fontfile_cache: dict[str, str | None] = {}
 
     # --- Lebenszyklus ---------------------------------------------------
     @property
@@ -79,9 +84,73 @@ class PdfDocument:
         page = self.doc[index]
         page.set_rotation((page.rotation + degrees) % 360)
 
+    # --- Schrift-Einbettung --------------------------------------------
+    def _embedded_fontfile(self, page: fitz.Page, basefont: str) -> str | None:
+        """Extrahiert die eingebettete Schrift `basefont` der Seite als Datei.
+
+        Liefert einen Pfad zu einer temporären Fontdatei oder None, wenn die
+        Schrift nicht eingebettet/extrahierbar ist (dann Basis-14-Fallback).
+        """
+        if not basefont:
+            return None
+        if basefont in self._fontfile_cache:
+            return self._fontfile_cache[basefont]
+        def alpha(s: str) -> str:
+            # Nur Buchstaben, ohne Subset-Präfix -> robust gegen "ArialMT" vs "Arial Regular"
+            return re.sub(r"[^a-z]", "", re.sub(r"^[A-Z]{6}\+", "", s or "").lower())
+
+        target = alpha(basefont)
+        best_xref: int | None = None
+        best_ext: str | None = None
+        best_score = -1
+        try:
+            for finfo in page.get_fonts(full=False):
+                xref, ext, bname = finfo[0], finfo[1], alpha(finfo[3])
+                if ext not in ("ttf", "otf", "cff", "ttc"):
+                    continue
+                # Länge des gemeinsamen Präfixes als Ähnlichkeitsmaß
+                n = 0
+                while n < min(len(bname), len(target)) and bname[n] == target[n]:
+                    n += 1
+                score = n
+                if bname and (bname in target or target in bname):
+                    score = max(score, min(len(bname), len(target)))
+                if score > best_score:
+                    best_score, best_xref, best_ext = score, xref, ext
+
+            path: str | None = None
+            if best_xref is not None and best_score >= 4:
+                extracted = self.doc.extract_font(best_xref)
+                content = extracted[-1]
+                real_ext = extracted[1] or best_ext
+                if content:
+                    fd, tmp = tempfile.mkstemp(suffix=f".{real_ext}")
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(content)
+                    path = tmp
+        except Exception:
+            path = None
+        self._fontfile_cache[basefont] = path
+        return path
+
+    def _cleanup_fontfiles(self) -> None:
+        for path in self._fontfile_cache.values():
+            if path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        self._fontfile_cache = {}
+
     # --- Speichern ------------------------------------------------------
     def apply_edits(self, model) -> None:
         """Schreibt alle ausstehenden Änderungen in das fitz-Dokument."""
+        try:
+            self._apply_edits(model)
+        finally:
+            self._cleanup_fontfiles()
+
+    def _apply_edits(self, model) -> None:
         for page_index, edits in model.edits_by_page().items():
             page = self.doc[page_index]
             text_edits = [e for e in edits if isinstance(e, TextEdit) and e.is_changed]
@@ -89,11 +158,16 @@ class PdfDocument:
             annot_edits = [e for e in edits if isinstance(e, AnnotEdit)]
             form_edits = [e for e in edits if isinstance(e, FormEdit)]
 
-            # 1. Redaktionen sammeln (Original-Inhalte entfernen)
+            # 0. Eingebettete Schriften sichern, SOLANGE der Originaltext noch da ist
+            #    (nach der Redaktion ist die Schrift evtl. nicht mehr referenziert)
             for edit in text_edits:
-                page.add_redact_annot(fitz.Rect(*edit.orig_rect))
+                self._embedded_fontfile(page, edit.orig_font)
+
+            # 1. Redaktionen sammeln (Original-Inhalte entfernen, in Cover-Farbe füllen)
+            for edit in text_edits:
+                page.add_redact_annot(fitz.Rect(*edit.orig_rect), fill=edit.cover_color)
             for edit in image_edits:
-                page.add_redact_annot(fitz.Rect(*edit.orig_rect))
+                page.add_redact_annot(fitz.Rect(*edit.orig_rect), fill=edit.cover_color)
             if text_edits or image_edits:
                 page.apply_redactions()
 
@@ -131,22 +205,31 @@ class PdfDocument:
         right = max(x + (edit.orig_rect[2] - edit.orig_rect[0]) + 6, page.rect.width - 4)
         bottom = page.rect.height - 4
         rect = fitz.Rect(x, y, right, bottom)
-        rc = page.insert_textbox(
-            rect,
-            edit.new_text,
-            fontname=edit.fontname,
-            fontsize=edit.fontsize,
-            color=edit.color,
-        )
-        if rc < 0:
-            # Fallback: einzeilig direkt an der Grundlinie einfügen (kein Clipping)
-            page.insert_text(
-                (x, y + edit.fontsize * 0.8),
-                edit.new_text,
-                fontname=edit.fontname,
-                fontsize=edit.fontsize,
-                color=edit.color,
+
+        # Originalschrift bevorzugen (gleiche Optik, v. a. beim Verschieben)
+        fontfile = self._embedded_fontfile(page, edit.orig_font)
+        if fontfile:
+            alias = "F" + (re.sub(r"\W", "", edit.orig_font)[:24] or "embed")
+            rc = page.insert_textbox(
+                rect, edit.new_text, fontname=alias, fontfile=fontfile,
+                fontsize=edit.fontsize, color=edit.color,
             )
+            if rc >= 0:
+                return  # erfolgreich mit Originalschrift gesetzt
+
+        # Fallback 1: Basis-14-Schrift in der Box
+        rc = page.insert_textbox(
+            rect, edit.new_text, fontname=edit.fontname,
+            fontsize=edit.fontsize, color=edit.color,
+        )
+        if rc >= 0:
+            return
+
+        # Fallback 2: einzeilig an der Grundlinie (kein Clipping)
+        page.insert_text(
+            (x, y + edit.fontsize * 0.8), edit.new_text,
+            fontname=edit.fontname, fontsize=edit.fontsize, color=edit.color,
+        )
 
     def _insert_image(self, page: fitz.Page, edit: ImageEdit) -> None:
         try:

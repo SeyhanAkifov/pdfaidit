@@ -4,8 +4,9 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QActionGroup, QKeySequence
+from PyQt6.QtGui import QAction, QActionGroup, QColor, QKeySequence
 from PyQt6.QtWidgets import (
+    QColorDialog,
     QDockWidget,
     QFileDialog,
     QLabel,
@@ -121,6 +122,19 @@ class MainWindow(QMainWindow):
             self._tool_actions[tool] = act
         self._tool_actions[Tool.SELECT].setChecked(True)
 
+        # Modus für die Überdeckung des entfernten Originals
+        self.cover_group = QActionGroup(self)
+        self.cover_group.setExclusive(True)
+        self.act_cover_auto = QAction("Automatisch (Hintergrund abtasten)", self, checkable=True)
+        self.act_cover_white = QAction("Weiß", self, checkable=True)
+        self.act_cover_custom = QAction("Eigene Farbe…", self, checkable=True)
+        self.act_cover_auto.setChecked(True)
+        for a in (self.act_cover_auto, self.act_cover_white, self.act_cover_custom):
+            self.cover_group.addAction(a)
+        self.act_cover_auto.triggered.connect(lambda: self._set_cover_mode("auto"))
+        self.act_cover_white.triggered.connect(lambda: self._set_cover_mode("white"))
+        self.act_cover_custom.triggered.connect(self._set_cover_custom)
+
     def _build_menu(self) -> None:
         bar = self.menuBar()
         m_file = bar.addMenu("&Datei")
@@ -138,6 +152,11 @@ class MainWindow(QMainWindow):
         m_view = bar.addMenu("&Ansicht")
         for a in (self.act_prev, self.act_next, self.act_zoom_in, self.act_zoom_out, self.act_fit):
             m_view.addAction(a)
+
+        m_opt = bar.addMenu("&Optionen")
+        m_cover = m_opt.addMenu("Hintergrund-Abdeckung")
+        for a in (self.act_cover_auto, self.act_cover_white, self.act_cover_custom):
+            m_cover.addAction(a)
 
     def _build_toolbar(self) -> None:
         tb = QToolBar("Haupt", self)
@@ -261,6 +280,25 @@ class MainWindow(QMainWindow):
         if self.edit_model.redo() is not None:
             self.view.load_page(self.view.current_page)
             self._update_actions_enabled()
+
+    # --- Hintergrund-Abdeckung -----------------------------------------
+    def _set_cover_mode(self, mode: str) -> None:
+        self.tools.cover_mode = mode
+        self.view.refresh_covers()
+
+    def _set_cover_custom(self) -> None:
+        initial = QColor.fromRgbF(*self.tools.cover_rgb)
+        color = QColorDialog.getColor(initial, self, "Farbe der Abdeckung")
+        if color.isValid():
+            self.tools.cover_rgb = (color.redF(), color.greenF(), color.blueF())
+            self.tools.cover_mode = "custom"
+            self.view.refresh_covers()
+        else:
+            # Abbruch -> vorherigen Modus-Knopf wiederherstellen
+            if self.tools.cover_mode == "auto":
+                self.act_cover_auto.setChecked(True)
+            elif self.tools.cover_mode == "white":
+                self.act_cover_white.setChecked(True)
 
     # --- UI-Status ------------------------------------------------------
     def _on_item_selected(self, item) -> None:

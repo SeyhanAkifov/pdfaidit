@@ -49,11 +49,20 @@ Das Ergebnis liegt unter `dist\pdfAIdit.exe`.
 
 ## Hinweise & Grenzen
 
-- **Text editieren** ist der anspruchsvollste Teil. Bei eingebetteten Spezialschriften kann
-  editierter Text in einer Standard-Schrift (Helvetica/Times/Courier) erscheinen; Schriftgröße
-  und Farbe lassen sich im Eigenschaften-Panel anpassen.
-- Verschieben/Editieren verdeckt das Original mit einer **weißen Fläche** (Annahme: heller
-  Seitenhintergrund). Bei farbigem Hintergrund kann das sichtbar sein.
+- **Schrift bleibt erhalten:** Beim Verschieben/Editieren wird die **eingebettete Originalschrift**
+  des PDFs extrahiert und wiederverwendet – die Optik bleibt also gleich. In der Editor-Vorschau
+  wird zusätzlich die passende Schriftfamilie samt Fett/Kursiv angezeigt.
+  - Eine **Standard-Schrift** (Helvetica/Times/Courier) wird nur als Fallback genutzt, wenn die
+    Schrift nicht eingebettet ist – oder wenn editierter Text **neue Zeichen** enthält, die im
+    eingebetteten (oft nur teilweisen) Schriftsatz fehlen. Schriftgröße/Farbe sind im
+    Eigenschaften-Panel anpassbar.
+- Verschieben/Editieren verdeckt den Originalbereich. Den **Modus der Abdeckung** stellst du
+  unter **Optionen → Hintergrund-Abdeckung** ein:
+  - *Automatisch* (Standard): die Hintergrundfarbe wird neben dem Text abgetastet – ideal für
+    farbige Seiten. Bei Farbverläufen wird eine passende Mischfarbe verwendet (kleiner Versatz möglich).
+  - *Weiß*: feste weiße Abdeckung (für weißes Papier).
+  - *Eigene Farbe…*: feste Wunschfarbe.
+  Die gewählte Farbe wird auch beim Speichern in das PDF übernommen.
 - **Seiten-Operationen** (löschen/verschieben/drehen) werden sofort auf das Dokument angewendet
   und setzen ausstehende Span-Änderungen zurück (sie speichern implizit den Strukturzustand).
 - **Lizenz PyMuPDF:** AGPL (oder kommerzielle Lizenz). Für private/interne Nutzung unkritisch;

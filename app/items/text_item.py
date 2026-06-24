@@ -7,6 +7,8 @@ verdeckt (siehe ``PageView.update_cover``) und der neue Text vom Item gezeichnet
 """
 from __future__ import annotations
 
+import re
+
 import fitz
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QFont, QPainterPath, QPen
@@ -16,6 +18,28 @@ from app.edits.edit_model import TextEdit
 
 _SELECT_PEN = QPen(QColor(0, 120, 215), 0, Qt.PenStyle.DashLine)
 _HOVER_PEN = QPen(QColor(0, 120, 215, 130), 0, Qt.PenStyle.DotLine)
+_SUBSET_PREFIX = re.compile(r"^[A-Z]{6}\+")
+
+
+def qfont_from_pdf(font_name: str, size: float) -> QFont:
+    """Baut eine möglichst passende QFont aus dem PDF-Fontnamen.
+
+    Setzt Schriftfamilie sowie Fett/Kursiv anhand des Namens. Ist die Familie
+    nicht installiert, ersetzt Qt sie – Stil (Gewicht/Neigung) bleibt erhalten.
+    """
+    name = _SUBSET_PREFIX.sub("", font_name or "")
+    lower = name.lower()
+    bold = any(k in lower for k in ("bold", "black", "heavy", "semibold", "demi"))
+    italic = "italic" in lower or "oblique" in lower
+    family = re.split(r"[-,]", name)[0].strip() or "Helvetica"
+    # Häufige PostScript-Schreibweisen leserlicher machen
+    family = re.sub(r"(MT|PSMT|PS|Std)$", "", family).strip() or "Helvetica"
+
+    font = QFont(family)
+    font.setPointSizeF(max(size, 1.0))
+    font.setBold(bold)
+    font.setItalic(italic)
+    return font
 
 
 def map_pdf_fontname(font: str) -> str:
@@ -46,7 +70,8 @@ class TextItem(QGraphicsTextItem):
         self.orig_text = span["text"]
         self.orig_rect = tuple(float(v) for v in span["bbox"])
         self.fontsize = float(span.get("size", 11) or 11)
-        self.fontname_pdf = map_pdf_fontname(span.get("font", ""))
+        self.orig_font = span.get("font", "")
+        self.fontname_pdf = map_pdf_fontname(self.orig_font)
 
         srgb = span.get("color", 0) or 0
         try:
@@ -57,9 +82,7 @@ class TextItem(QGraphicsTextItem):
         # Darstellung
         self.document().setDocumentMargin(0)
         self.setPlainText(self.orig_text)
-        font = QFont()
-        font.setPointSizeF(max(self.fontsize, 1.0))
-        self.setFont(font)
+        self.setFont(qfont_from_pdf(self.orig_font, self.fontsize))
         self.setDefaultTextColor(QColor.fromRgbF(*self.color))
 
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -165,6 +188,7 @@ class TextItem(QGraphicsTextItem):
             orig_rect=self.orig_rect,
             orig_text=self.orig_text,
             fontname=self.fontname_pdf,
+            orig_font=self.orig_font,
             fontsize=self.fontsize,
             color=self.color,
             new_text=self.toPlainText(),

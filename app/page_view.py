@@ -149,17 +149,68 @@ class PageView(QGraphicsView):
         edit = self.edit_model.get(item.page_index, item.item_id)
         needs = edit is not None
         cover = getattr(item, "_cover", None)
-        if needs and cover is None:
-            x0, y0, x1, y1 = item.orig_rect
-            cover = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
-            cover.setBrush(_WHITE)
-            cover.setPen(QPen(Qt.PenStyle.NoPen))
-            cover.setZValue(0)
-            self.scene.addItem(cover)
-            item._cover = cover
-        elif not needs and cover is not None:
+        if needs:
+            color = self._cover_qcolor(item)
+            if cover is None:
+                x0, y0, x1, y1 = item.orig_rect
+                cover = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
+                cover.setPen(QPen(Qt.PenStyle.NoPen))
+                cover.setZValue(0)
+                self.scene.addItem(cover)
+                item._cover = cover
+            cover.setBrush(QBrush(color))
+            # Farbe in den Edit schreiben, damit sie beim Speichern verwendet wird
+            if hasattr(edit, "cover_color"):
+                edit.cover_color = (color.redF(), color.greenF(), color.blueF())
+        elif cover is not None:
             self.scene.removeItem(cover)
             item._cover = None
+
+    def refresh_covers(self) -> None:
+        """Berechnet alle aktiven Cover neu (z. B. nach Moduswechsel)."""
+        for item in self.text_items + self.image_items:
+            if getattr(item, "_cover", None) is not None:
+                self.update_cover(item)
+
+    def _cover_qcolor(self, item) -> QColor:
+        mode = self.tools.cover_mode
+        if mode == "white":
+            return QColor(255, 255, 255)
+        if mode == "custom":
+            return QColor.fromRgbF(*self.tools.cover_rgb)
+        return self._sample_bg_color(item.orig_rect)
+
+    def _sample_bg_color(self, orig_rect) -> QColor:
+        """Tastet die Hintergrundfarbe knapp außerhalb des Textbereichs ab."""
+        pix = getattr(self, "_page_pixmap", None)
+        if pix is None:
+            return QColor(255, 255, 255)
+        image = pix.toImage()
+        z = self.RENDER_ZOOM
+        x0, y0, x1, y1 = (v * z for v in orig_rect)
+        margin = max(int(2 * z), 2)
+        cx, cy = int((x0 + x1) / 2), int((y0 + y1) / 2)
+        candidates = [
+            (int(x0) - margin, cy),          # links
+            (int(x1) + margin, cy),          # rechts
+            (cx, int(y0) - margin),          # oben
+            (cx, int(y1) + margin),          # unten
+        ]
+        reds, greens, blues = [], [], []
+        for px, py in candidates:
+            if 0 <= px < image.width() and 0 <= py < image.height():
+                c = image.pixelColor(px, py)
+                reds.append(c.red())
+                greens.append(c.green())
+                blues.append(c.blue())
+        if not reds:
+            return QColor(255, 255, 255)
+
+        def median(values):
+            values.sort()
+            return values[len(values) // 2]
+
+        return QColor(median(reds), median(greens), median(blues))
 
     # --- Auswahl / Änderungen ------------------------------------------
     def selection_changed(self, item) -> None:
